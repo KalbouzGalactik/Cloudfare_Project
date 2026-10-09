@@ -12,10 +12,12 @@ On ne garde que les trajets qui :
 Les trip_id changent d'une version du GTFS Static à l'autre : le fichier doit être régénéré
 à chaque nouvelle version (le workflow GitHub le fait chaque nuit).
 """
-import csv, io, json, os, sys, zipfile
+import csv, io, json, os, re, sys, zipfile
 from collections import defaultdict
 
-STOPS = [("Mons HELHA", "H1ms367a"), ("Mons Ferme", "H1ms279a"), ("Mons Chemin d'Obourg", "H1ms266a")]
+# Base de l'identifiant SANS la lettre du quai : un même arrêt a plusieurs quais (a, b, c...) selon la direction / la ligne.
+# Le sens "vers la gare" est de toute façon vérifié plus bas (un arrêt de la gare doit venir APRÈS dans le trajet).
+STOPS = [("Mons HELHA", "H1ms367"), ("Mons Ferme", "H1ms279"), ("Mons Chemin d'Obourg", "H1ms266")]
 GARE = ["H1ms401"]          # préfixe : couvre les quais a à f
 
 
@@ -52,13 +54,16 @@ def main():
     for r in rows(z, "stops.txt"):
         sid = norm(r["stop_id"])
         for i, (_, code) in enumerate(STOPS):
-            if sid == code.lower():
+            if re.fullmatch(re.escape(code.lower()) + r"[a-z]?", sid):      # tous les quais de l'arrêt
                 own[r["stop_id"]] = i
         if any(sid.startswith(g.lower()) for g in GARE):
             gare.add(r["stop_id"])
-    print(f"arrêts de départ trouvés : {len(own)}/3   arrêts gare : {sorted(gare)}")
-    if len(own) < 3 or not gare:
-        print("ATTENTION : arrêts introuvables dans stops.txt, vérifie les identifiants.")
+    print(f"quais de départ trouvés : {len(own)}   quais gare : {len(gare)}")
+    for sid, i in sorted(own.items(), key=lambda x: (x[1], x[0])):
+        print(f"   {STOPS[i][0]:24s} {sid}")
+    found = {i for i in own.values()}
+    if len(found) < 3 or not gare:
+        print("ATTENTION : arrêt introuvable dans stops.txt, vérifie les identifiants.")
 
     # 2) stop_times (plusieurs centaines de Mo) : on ne retient que nos arrêts + le premier arrêt de chaque trajet
     mine = defaultdict(list)       # trip -> [(seq, kind, idx, arr, dep)]
@@ -94,7 +99,11 @@ def main():
                 p.append([idx, dep])
                 g = g if g is not None else (nxt[3] if nxt[3] is not None else nxt[4])
         if p:
-            keep[t] = (p, g)
+            seen, uniq = set(), []
+            for a in p:                       # un trajet qui touche 2 quais du même arrêt : on garde le premier passage
+                if a[0] not in seen:
+                    seen.add(a[0]); uniq.append(a)
+            keep[t] = (uniq, g)
     print(f"trajets vers la gare : {len(keep)}")
 
     # 4) trips + routes
@@ -125,7 +134,16 @@ def main():
 
     ends = [v["z"] for v in svc.values() if "z" in v] + [d for v in svc.values() for d in v.get("+", [])]
     starts = [v["a"] for v in svc.values() if "a" in v]
-    doc = {"v": 1, "debut": min(starts) if starts else None, "fin": max(ends) if ends else None,
+    ids = defaultdict(set)
+    for sid, i in own.items():
+        ids[STOPS[i][0]].add(norm(sid))
+    lignes = defaultdict(set)
+    for t in trips:
+        for idx, _ in t["p"]:
+            lignes[STOPS[idx][0]].add(t["l"])
+    for n, _ in STOPS:
+        print(f"lignes vers la gare à {n} : {sorted(lignes[n]) or 'AUCUNE'}")
+    doc = {"v": 1, "ids": {k: sorted(v) for k, v in ids.items()}, "debut": min(starts) if starts else None, "fin": max(ends) if ends else None,
            "stops": [n for n, _ in STOPS], "svc": svc, "trips": trips}
     if not trips:
         sys.exit("ERREUR : aucun trajet vers la gare trouvé, horaire.json NON écrit (identifiants à vérifier).")
