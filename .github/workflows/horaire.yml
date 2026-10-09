@@ -1,0 +1,45 @@
+# Lancé par le Worker Cloudflare « cron » (appel API workflow_dispatch), ou à la main (bouton « Run workflow »).
+#   1. télécharge le GTFS Static du TEC (public, CC0)
+#   2. génère horaire.json (si aucun trajet vers la gare n'est trouvé : échec, rien n'est publié)
+#   3. le publie sur la branche « data » (une seule version, pas d'historique qui grossit)
+# Le Worker du site lit ensuite : https://raw.githubusercontent.com/<compte>/<depot>/data/horaire.json
+name: Horaire TEC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: horaire
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Télécharger le GTFS Static du TEC
+        run: |
+          curl -fL --retry 4 --retry-delay 15 -o gtfs.zip "https://opendata.tec-wl.be/Current%20GTFS/TEC-GTFS.zip"
+          ls -l gtfs.zip
+
+      - name: Générer horaire.json
+        run: python build-horaire.py gtfs.zip out/horaire.json
+
+      - name: Publier sur la branche data
+        run: |
+          cd out
+          git init -q -b data
+          git config user.name "horaire-bot"
+          git config user.email "horaire-bot@users.noreply.github.com"
+          git add horaire.json
+          git commit -qm "horaire $(date -u +%F)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
